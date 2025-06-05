@@ -6,6 +6,18 @@ import { getCorsHeaders } from './cors-helper.js';
 // Load environment variables
 dotenv.config();
 
+// Log the MongoDB URI (with password masked)
+const logMongoURI = () => {
+  const uri = process.env.MONGODB_URI || '';
+  if (uri) {
+    // Mask the password in the URI for logging
+    const maskedUri = uri.replace(/:([^@]+)@/, ':****@');
+    console.log('MongoDB URI:', maskedUri);
+  } else {
+    console.log('MongoDB URI is not defined');
+  }
+};
+
 // Define Contact schema directly in this file
 const contactSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -29,8 +41,12 @@ let cachedConnection = null;
 
 // Connect to MongoDB
 const connectDB = async () => {
+  // Log the MongoDB URI for debugging
+  logMongoURI();
+  
   // If we already have a connection, use it
   if (cachedConnection && mongoose.connection.readyState === 1) {
+    console.log('Using existing MongoDB connection');
     return cachedConnection;
   }
 
@@ -38,18 +54,20 @@ const connectDB = async () => {
   const connectionOptions = {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-    serverSelectionTimeoutMS: 5000, // 5 seconds (reduced from default)
-    socketTimeoutMS: 10000, // 10 seconds (reduced from default)
-    connectTimeoutMS: 5000, // 5 seconds
+    serverSelectionTimeoutMS: 10000, // 10 seconds
+    socketTimeoutMS: 45000, // 45 seconds
+    connectTimeoutMS: 10000, // 10 seconds
   };
 
   try {
+    console.log('Attempting to connect to MongoDB...');
     const conn = await mongoose.connect(process.env.MONGODB_URI, connectionOptions);
     cachedConnection = conn;
     console.log(`MongoDB Connected: ${conn.connection.host}`);
+    console.log(`Database name: ${conn.connection.name}`);
     return conn;
   } catch (error) {
-    console.error(`MongoDB connection error: ${error.message}`);
+    console.error('MongoDB connection error details:', error);
     throw error;
   }
 };
@@ -93,40 +111,44 @@ export const handler = async (event, context) => {
       };
     }
     
-    // Process in parallel to save time
-    const promises = [];
+    // Connect to database first with proper error handling
+    let dbSuccess = false;
+    let dbError = null;
     
-    // Connect to database first (to establish connection early)
     try {
+      // Connect to MongoDB
       await connectDB();
       
-      // Add database save to promises
+      // Create and save the contact document
+      console.log('Creating contact document:', { name, email, phone, subject });
       const contact = new Contact({ name, email, phone, subject, message });
-      promises.push(contact.save().catch(dbError => {
-        console.error('Error saving to database:', dbError);
-        // Don't fail the whole function if DB save fails
-        return null;
-      }));
-    } catch (dbConnError) {
-      console.error('Database connection failed:', dbConnError);
-      // Continue with email if DB connection fails
+      const savedContact = await contact.save();
+      console.log('Contact saved successfully:', savedContact._id);
+      dbSuccess = true;
+    } catch (err) {
+      dbError = err;
+      console.error('Error saving contact to database:', err);
     }
     
-    // Add email sending to promises
-    promises.push(sendContactEmail({ name, email, phone, subject, message }).catch(emailError => {
+    // Send email regardless of database success
+    try {
+      await sendContactEmail({ name, email, phone, subject, message });
+      console.log('Email sent successfully');
+    } catch (emailError) {
       console.error('Error sending email:', emailError);
-      throw emailError; // We do want to fail if email fails
-    }));
-    
-    // Wait for all promises to resolve
-    await Promise.all(promises);
+      
+      // If both DB and email failed, throw the error
+      if (!dbSuccess) {
+        throw emailError;
+      }
+    }
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({ 
         success: true, 
-        message: 'Thank you for your message. We will get back to you soon!' 
+        message: 'Thank you for your message. We will get back to you soon!',
       })
     };
   } catch (error) {
@@ -136,7 +158,8 @@ export const handler = async (event, context) => {
       headers,
       body: JSON.stringify({ 
         success: false, 
-        message: 'An error occurred while processing your request. Please try again later.' 
+        message: 'An error occurred while processing your request. Please try again later.',
+        error: error.message
       })
     };
   }
