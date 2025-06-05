@@ -24,19 +24,33 @@ try {
   Contact = mongoose.model('Contact', contactSchema);
 }
 
+// MongoDB connection promise - reuse connection between function invocations
+let cachedConnection = null;
+
 // Connect to MongoDB
 const connectDB = async () => {
-  if (mongoose.connection.readyState !== 1) {
-    try {
-      await mongoose.connect(process.env.MONGODB_URI, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      });
-      console.log('MongoDB Connected');
-    } catch (error) {
-      console.error(`MongoDB connection error: ${error.message}`);
-      throw error;
-    }
+  // If we already have a connection, use it
+  if (cachedConnection && mongoose.connection.readyState === 1) {
+    return cachedConnection;
+  }
+
+  // Set connection options with shorter timeouts
+  const connectionOptions = {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 5000, // 5 seconds (reduced from default)
+    socketTimeoutMS: 10000, // 10 seconds (reduced from default)
+    connectTimeoutMS: 5000, // 5 seconds
+  };
+
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI, connectionOptions);
+    cachedConnection = conn;
+    console.log(`MongoDB Connected: ${conn.connection.host}`);
+    return conn;
+  } catch (error) {
+    console.error(`MongoDB connection error: ${error.message}`);
+    throw error;
   }
 };
 
@@ -79,21 +93,33 @@ export const handler = async (event, context) => {
       };
     }
     
-    // Connect to database
-    await connectDB();
+    // Process in parallel to save time
+    const promises = [];
     
-    // Try to save to database, but continue even if it fails
+    // Connect to database first (to establish connection early)
     try {
+      await connectDB();
+      
+      // Add database save to promises
       const contact = new Contact({ name, email, phone, subject, message });
-      await contact.save();
-      console.log('Contact form data saved to database');
-    } catch (dbError) {
-      console.error('Error saving to database:', dbError);
-      // Continue with email send even if database save fails
+      promises.push(contact.save().catch(dbError => {
+        console.error('Error saving to database:', dbError);
+        // Don't fail the whole function if DB save fails
+        return null;
+      }));
+    } catch (dbConnError) {
+      console.error('Database connection failed:', dbConnError);
+      // Continue with email if DB connection fails
     }
     
-    // Send email
-    await sendContactEmail({ name, email, phone, subject, message });
+    // Add email sending to promises
+    promises.push(sendContactEmail({ name, email, phone, subject, message }).catch(emailError => {
+      console.error('Error sending email:', emailError);
+      throw emailError; // We do want to fail if email fails
+    }));
+    
+    // Wait for all promises to resolve
+    await Promise.all(promises);
     
     return {
       statusCode: 200,
