@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { sendContactEmail } from '../../services/emailService.js';
+import { getCorsHeaders } from './cors-helper.js';
 
 // Load environment variables
 dotenv.config();
@@ -43,10 +44,23 @@ export const handler = async (event, context) => {
   // Make the function use connection reuse
   context.callbackWaitsForEmptyEventLoop = false;
   
+  // Get CORS headers based on the request origin
+  const headers = getCorsHeaders(event.headers.origin || event.headers.Origin);
+  
+  // Handle OPTIONS request (preflight)
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers,
+      body: ''
+    };
+  }
+  
   // Only process POST requests
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
+      headers,
       body: JSON.stringify({ success: false, message: 'Method not allowed' })
     };
   }
@@ -60,6 +74,7 @@ export const handler = async (event, context) => {
     if (!name || !email || !phone || !subject || !message) {
       return {
         statusCode: 400,
+        headers,
         body: JSON.stringify({ success: false, message: 'All fields are required' })
       };
     }
@@ -82,6 +97,7 @@ export const handler = async (event, context) => {
     
     return {
       statusCode: 200,
+      headers,
       body: JSON.stringify({ 
         success: true, 
         message: 'Thank you for your message. We will get back to you soon!' 
@@ -91,6 +107,7 @@ export const handler = async (event, context) => {
     console.error('Error processing contact form:', error);
     return {
       statusCode: 500,
+      headers,
       body: JSON.stringify({ 
         success: false, 
         message: 'An error occurred while processing your request. Please try again later.' 
